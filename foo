@@ -1,0 +1,444 @@
+#!/bin/bash
+export LANG=en_US.UTF-8
+export LANGUAGE=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+#use /opt/chef/embedded/bin for ruby
+PATH="/opt/chef/embedded/bin:$PATH"
+
+minDiskSpacePercent=95
+lucidchefMainDir="/etc/chef/lucidchef"
+warningColor='\033[1;33m'
+noColor='\033[0m'
+lucidChefBranchConfigFile="/etc/chef/branch-override"
+lucidChefLocal="/etc/chef/directory-override"
+manualEnvironmentFile="${lucidchefMainDir}/environment"
+manualRunlistFile="${lucidchefMainDir}/runlist"
+manualIamNameFile="${lucidchefMainDir}/iamname"
+lucidbagDir="${lucidchefMainDir}/lucidbag"
+chefDir="${lucidbagDir}/chef"
+awsCmd="aws --output json --region us-east-1"
+chefRunId=$(date +%s%N)
+chefEnvironmentsDir="${lucidbagDir}/environments"
+chefEnvironmentsTempDir="${lucidbagDir}/tempEnvironments"
+rubyWebserverFile="${lucidchefMainDir}/webserver.rb"
+nodejsonFile="${lucidchefMainDir}/node.json"
+solorbFile="${lucidchefMainDir}/solo.rb"
+customAttrs="/etc/chef/custom-attributes.json"
+persistedAttrs="/etc/chef/persisted-attributes.json"
+awsCmdTimeout=30
+sshWrapperScript="${lucidbagDir}/sshWrapper"
+lockFile="/tmp/chef-solo.lock"
+sshWrapperScriptCont='#!/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+exec ssh -o StrictHostKeyChecking=no -i "'${lucidbagDir}/gitsshkey'" "${@}"'
+
+gitRepoUrl="$(dig chefrepourl.lucidchart.com txt +short|sed 's/"//g')"
+defaultGitRepoUrl="ssh://git.lucidchart.com:7999/OPS/chef"
+allOptions=$@
+bootstrapWorkstation=FALSE
+branch="master"
+
+function sendMetric() {
+  echo "chef.${1}:${2}|${3}" | socat -T .1 UDP:localhost:8130 - 2>/dev/null
+}
+
+function createLock() {
+  curDate=$(date +%s)
+  if [ -e "${lockFile}" ]; then
+    lockFileModTime=$(stat -c %Y "${lockFile}")
+    dateDiff=$((${curDate}-${lockFileModTime}))
+    if [[ ${dateDiff} -gt 900 || ${dateDiff} -le 0 ]]; then
+      rm "${lockFile}"
+    else
+      echo "Failed to get lock, another instance of chef may be running"
+      echo "If chef is not running, you can manually remove the lock file: ${lockFile}"
+      exit 1
+    fi
+  fi
+  touch "${lockFile}"
+}
+
+function removeLock() {
+  rm -f "${lockFile}"
+}
+
+function doExit() {
+  exitCode="${1}"
+  message="${2}"
+  removeLock
+  echo "code: ${exitCode} -- ${message}"
+  exit "${exitCode}"
+}
+
+function checkJsonKey() {
+  string="${1}"
+  jsonFile="${2}"
+  grep -q '^[[:space:]]*"'"${string}"'"' "${jsonFile}"
+}
+
+function getJsonValue() {
+  key="${1}"
+  jsonFile="${2}"
+  ruby -e "require 'json'
+    var=JSON.parse(IO.read('${jsonFile}'))
+    puts var['${key}']"
+}
+
+function checkInstallPackage() {
+  package="${1}"
+  if ( ! dpkg -l |awk '{print $2}'|grep -q "^${package}$"  ); then
+    echo "${package} not found. Installing ${package} now."
+    if ( ! apt-get -y install ${package} ); then
+      doExit 1 "Failed to install ${package}."
+    fi
+    echo "${package} installed successfully"
+  fi
+}
+
+createLock
+trap 'removeLock' EXIT
+
+if [ -f "${lucidChefBranchConfigFile}" ]; then
+  branch=$(cat "${lucidChefBranchConfigFile}"|grep .|head -n1)
+fi
+
+if [[ -f "${lucidChefLocal}" ]]; then
+  chefDir=$(cat "${lucidChefLocal}")
+  useLocalChefDir="true"
+fi
+
+if [[ "${gitRepoUrl}" == "" ]]; then
+  echo "Failed to retreive git URL. Using ${defaultGitRepoUrl}"
+  gitRepoUrl="${defaultGitRepoUrl}"
+fi
+
+#get the command line arguments
+while [[ $# > 0 ]]; do
+  option="$1"
+  shift
+
+  case $option in
+    -c)
+      chefDir="$1"
+      useLocalChefDir="true"
+      shift
+      ;;
+    -b|--branch)
+      branch="$1"
+      shift
+      ;;
+    --bootstrapWorkstation)
+      bootstrapWorkstation=TRUE
+      ;;
+  esac
+done
+
+#make sure that lucidchefMainDir exists
+mkdir -p "${lucidchefMainDir}"
+chmod 700 "${lucidchefMainDir}"
+
+#make it easy to bootstrap workstations
+if [[ $bootstrapWorkstation == TRUE ]]; then
+  echo '[default]
+aws_access_key_id = AKIAIKLURJUVYWAMEYGQ
+aws_secret_access_key = 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
+output = text
+region = us-east-1' > "${lucidchefMainDir}/awscreds"
+
+  echo 'workstation' > "${lucidchefMainDir}/environment"
+
+  echo 'workstation' > "${lucidchefMainDir}/iamname"
+
+  echo 'role[allstack]' > "${lucidchefMainDir}/runlist"
+
+  mkdir -p /var/lib/mysql
+
+  doExit 0 "Node now configured to be a workstation... if this is not intended STOP NOW and FIX IT."
+fi
+
+#check to make sure that we are the root user
+if [[ $(id -u) -ne 0 ]]; then
+  doExit 1 "This script must be run as the root user."
+fi
+
+echo "chef chef/chef_server_url string http://localhost:4000"|debconf-set-selections
+checkInstallPackage chef
+
+checkInstallPackage ruby-escape
+
+checkInstallPackage git
+
+checkInstallPackage python-pip
+
+checkInstallPackage curl
+
+if ( ! which aws ); then
+  echo "awscli not installed, installing"
+  if ( ! pip install awscli && ! which aws ); then
+    doExit 1 "awscli install failed"
+  fi
+fi
+
+#check to make sure that we have enough disk space to run
+rootDiskSpacePercent=$(df|awk '{if ($NF == "/"){sub("%",""); print $(NF-1)}}')
+if [[ ${minDiskSpacePercent} -le ${rootDiskSpacePercent} ]]; then
+  doExit 1 "${rootDiskSpacePercent}% of the root mount is in use. Please free up disk space before running this command."
+fi
+
+#get the EC2 instance ID if it exists
+instanceId=$(timeout 2 curl http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+if [[ ! -n "${instanceId}" ]]; then
+  s3BucketName='lucidbag-lucidchart-prod'
+  export AWS_CONFIG_FILE="${lucidchefMainDir}/awscreds"
+else
+  macid=$(timeout 2 curl http://169.254.169.254/latest/meta-data/network/interfaces/macs/ 2>/dev/null | head -n1)
+  vpcid=$(timeout 2 curl http://169.254.169.254/latest/meta-data/network/interfaces/macs/${macid}/vpc-id/ 2>/dev/null)
+  if [[ "${vpcid}" == "vpc-5f019b35" ]]; then
+    s3BucketName='lucidbag-lucidchart-prod'
+  elif [[ "${vpcid}" == "vpc-58f9873c" ]]; then
+    s3BucketName='lucidbag-lucidchart-preprod'
+  fi
+fi
+
+#check for and set environment files
+if [[ -e "${manualEnvironmentFile}" ]]; then
+  environment=$(cat "${manualEnvironmentFile}")
+  if [[ ! "${environment}" ]]; then
+    doExit 1 "${environment} file must contain a valid chef environment"
+  fi
+else
+  if [[ "${instanceId}" ]]; then
+    environment=$(timeout ${awsCmdTimeout} ${awsCmd} ec2 describe-tags --filters Name=resource-id,Values=${instanceId} Name=key,Values=ChefEnvironment|awk '{if ($1 ~ /Value/){$1="";sub(/,$/,"");gsub("\"","");gsub(" ","");print}}')
+    if [[ ! "${environment}" ]]; then
+      doExit 1 "Unable to retreive chef environment from AWS. It is either not set or this instance does not have permissions to read the tag."
+    fi
+  else
+    doExit 1 "This does not appear to be an aws host and the environment file does not exist. Please populate ${manualEnvironmentFile} with the chef environment and run this command again."
+  fi
+fi
+
+#check for and set run list
+if [[ -e "${manualRunlistFile}" ]]; then
+  runlist=$(cat "${manualRunlistFile}")
+  if [[ ! "${runlist}" ]]; then
+    doExit 1 "${runlist} must contain a valid chef runlist."
+  fi
+else
+  if [[ "${instanceId}" ]]; then
+    runlist=$(timeout ${awsCmdTimeout} ${awsCmd} ec2 describe-tags --filters Name=resource-id,Values=${instanceId} Name=key,Values=ChefRunlist|awk '{if ($1 ~ /Value/){$1="";sub(/,$/,"");print}}')
+    if [[ ! "${runlist}" ]]; then
+      doExit 1 "Unable to retreive chef run list from AWS. It is either not set or this instance does not have permissions to read the tag."
+    fi
+  else
+    doExit 1 "This does not appear to be an aws host and the runlist file does not exist. Please populate ${manualRunlistFile} with the chef run list and run this command again."
+  fi
+fi
+runlist=$(echo "${runlist}"|awk '{gsub(" ",""); gsub("\"",""); gsub(",","\",\""); print "\""$0"\""}')
+
+#check for and set iam name
+if [[ -e "${manualIamNameFile}" ]]; then
+  iamname=$(cat "${manualIamNameFile}")
+else
+  if [[ "${instanceId}" ]]; then
+    iamname=$(timeout 2 curl http://169.254.169.254/latest/meta-data/iam/info 2>/dev/null|grep "InstanceProfileArn"|awk 'BEGIN{FS="/"}{gsub("\"",""); gsub(",",""); print $NF}')
+    if [[ ! "${iamname}" ]]; then
+      doExit 1 "Unable to retreive iamname AWS. It is either not set or this instance does not have permissions to read the tag."
+    fi
+  else
+    doExit 1 "This does not appear to be an aws host and the runlist file does not exist. Please populate ${manualIamNameFile} with the IAM name and run this command again."
+  fi
+fi
+
+#fix workstations... this can be removed at some point
+if [[ ! "${instanceId}" && "${iamname}" == "default" ]]; then
+  iamname="workstation"
+  echo "${iamname}" > "${manualIamNameFile}"
+fi
+
+#sync aws s3 secure repo
+mkdir -p "${lucidbagDir}"
+if ( ! timeout ${awsCmdTimeout} ${awsCmd} s3 cp s3://${s3BucketName}/.iams/default/lucidBag.json "${lucidbagDir}/default.json" ); then
+  doExit 1 "Failed to checkout default lucidbag file."
+fi
+if ( timeout ${awsCmdTimeout} ${awsCmd} s3 ls s3://${s3BucketName}/.iams/|grep -q " ${iamname}/" ); then
+  if ( ! timeout ${awsCmdTimeout} ${awsCmd} s3 cp s3://${s3BucketName}/.iams/${iamname}/lucidBag.json "${lucidbagDir}/lucidbag.json" ); then
+    doExit 1 "Failed to checkout ${iamname} lucidbag file."
+  fi
+fi
+if ( ! checkJsonKey "gitDefaultKey" "${lucidbagDir}/default.json" ); then
+  doExit 1 "gitDefaultKey not defined in default.json"
+fi
+
+#download environment json file from IAM
+mkdir -p "${chefEnvironmentsDir}"
+mkdir -p "${chefEnvironmentsTempDir}"
+if ( ! timeout ${awsCmdTimeout} ${awsCmd} s3 cp s3://${s3BucketName}/.iams/${iamname}/${environment}.json "${chefEnvironmentsTempDir}/" ); then
+  doExit 1 "Failed to download environment json file from s3"
+fi
+
+chefEnvironmentFile="${chefDir}/environments/${environment}.json"
+lucidBagEnvironmentFile="${chefEnvironmentsTempDir}/${environment}.json"
+
+
+#save default aws creds
+if ( ! getJsonValue "awsDefaultLucidBagCreds" "${lucidbagDir}/default.json" > "${lucidchefMainDir}/awscreds" ); then
+  doExit 1 "Failed to extract default aws creds from ${lucidbagDir}/default.json"
+fi
+[[ -f "${lucidbagDir}/gitsshkey" ]] && chmod 600 "${lucidbagDir}/gitsshkey"
+
+#sync chef config from git
+if ( ! getJsonValue "gitDefaultKey" "${lucidbagDir}/default.json" > "${lucidbagDir}/gitsshkey" ); then
+  doExit 1 "Failed to extract git sshkey from ${lucidbagDir}/default.json"
+fi
+[[ -f "${lucidbagDir}/gitsshkey" ]] && chmod 600 "${lucidbagDir}/gitsshkey"
+
+echo "${sshWrapperScriptCont}" > "${sshWrapperScript}"
+chmod +x "${sshWrapperScript}"
+export GIT_SSH="${sshWrapperScript}"
+
+if [[ "${useLocalChefDir}" != "true" ]]; then
+  cd "${lucidbagDir}"
+  error=false
+  if [ -e "${lucidbagDir}/chef/.git/config" ]; then
+    cd "${lucidbagDir}/chef"
+    git reset --hard \
+      && git clean -dfx \
+      && timeout 60 git fetch --depth=1 "${gitRepoUrl}" "+refs/heads/${branch}:refs/remotes/origin/${branch}" \
+      && git checkout "refs/remotes/origin/${branch}" \
+      || error=true
+  else
+    timeout 60 git clone -b "${branch}" -n --depth=1 "${gitRepoUrl}" \
+      || error=true
+  fi
+  if [[ "${error}" == "true" ]]; then
+    doExit 1 "failed to do sync from git"
+  fi
+
+  # if lucid-chef has changed, then update this script and try again.
+  # (! diff) means (! same) in this case.
+  if ( ! diff -q "${chefDir}/cookbooks/chef-client/files/default/lucid-chef1404" "$0" ); then
+    echo "=============================================================="
+    echo "= lucid-chef has changed. Updating script and running again. ="
+    echo "=============================================================="
+    cp "${chefDir}/cookbooks/chef-client/files/default/lucid-chef1404" "$0"
+    removeLock
+    "$0" "$allOptions"
+    exit $?
+  fi
+fi
+
+
+ruby -e 'require "rubygems"
+require "json"
+original = ARGV[0]
+credentials = ARGV[1]
+output_file = ARGV[2]
+JSON.create_id = nil
+JSON.create_id=nil
+env = JSON.parse(IO.read(original).sub("json_class","TEMPKEYNAME"))
+cred = JSON.parse(IO.read(credentials).sub("json_class","TEMPKEYNAME"))
+def merge(destination, source)
+  source.keys.each{|key|
+    if destination.has_key?(key) then
+      if destination[key].class == Hash && source[key].class == Hash then
+        merge(destination[key], source[key])
+      elsif destination[key].class == Array && source[key].class == Array then
+        mergeArray(destination[key], source[key])
+      else
+        abort("Error! Conflicting values" + JSON.generate(destination) + " " + JSON.generate(source))
+      end
+    else
+      destination[key] = source[key]
+    end
+  }
+end
+def mergeArray(destination, source)
+  if destination.length == source.length then
+    destination.zip(source).each{|dest, src|
+      if dest.class == Hash && src.class == Hash then
+        merge(dest,src)
+      elsif dest.class == Array && src.class == Array then
+        mergeArray(dest,src)
+      else
+        abort("Error! cannot merge arrays: " + JSON.generate(destination) + " " + JSON.generate(source))
+      end
+    }
+  else
+    abort("Error! cannot merge arrays: " + JSON.generate(destination) + " " + JSON.generate(source))
+  end
+
+end
+merge(env, cred)
+output = JSON.generate(env).sub("TEMPKEYNAME","json_class")
+File.open(output_file, "w") {|f| f.puts(output) }
+' "${chefEnvironmentFile}" "${lucidBagEnvironmentFile}" "${chefEnvironmentsDir}/${environment}.json"
+
+if [[ $? -ne 0 ]]; then
+  doExit 1 "Failed to merge environment file"
+fi
+
+touch "${nodejsonFile}"
+chmod 600 "${nodejsonFile}"
+(
+  echo '{'
+  echo '  "run_list": [ '${runlist}' ],'
+  if [[ -e "${lucidbagDir}/lucidbag.json" ]]; then
+    echo '"lucidBag": '"$(cat ${lucidbagDir}/lucidbag.json)"','
+  fi
+  ruby -e "require 'json'
+           require 'chef/mixin/deep_merge'
+           require 'chef/mash'
+           merged = {\"AnotherCrappyString\" => true}
+           ARGV.each do |file|
+             if File.exist?(file)
+               contents = File.read(file)
+               if !contents.strip.empty?
+                 json = JSON.parse(contents)
+                 merged = Chef::Mixin::DeepMerge.merge(merged, json)
+               end
+             end
+           end
+           puts JSON.generate(merged)" "${persistedAttrs}" "${customAttrs}"|sed -e 's/^{//' -e 's/}$//'
+  echo '}'
+) > "${nodejsonFile}"
+
+touch "${solorbFile}"
+chmod 600 "${solorbFile}"
+echo 'require "base64"
+solo true
+environment "'${environment}'"
+environment_path "'${lucidbagDir}'/environments/"
+cookbook_path "'${chefDir}'/cookbooks"
+data_bag_path "'${chefDir}'/data_bags"
+lockfile "/tmp/chef_lock_file"
+log_level :info
+log_location "/var/log/chef/client.log"
+role_path "'${chefDir}'/roles"
+json_attribs "'${nodejsonFile}'"' > "${solorbFile}"
+
+if [[ ! -e "/etc/chef/client.pem" ]]; then
+  openssl req -new -newkey rsa:2048 -nodes -subj '/CN=www.lucidchart.com/O=Lucid Software, Inc./C=US/ST=Utah/L=Draper' -keyout /etc/chef/client.pem -out /dev/null
+fi
+
+#echo todo, actually run chef-solo :)
+chef-solo -c "${solorbFile}"
+chefStatusCode=$?
+
+if [[ -e "${lucidChefBranchConfigFile}" ]]; then
+  sendMetric "branch_override" "1" "g"
+  echo -e "${warningColor}Warning: branch override file exists. Remember to delete ${lucidChefBranchConfigFile}${noColor}"
+else
+  sendMetric "branch_override" "0" "g"
+fi
+
+if [[ -e "${lucidChefLocal}" ]]; then
+  echo -e "${warningColor}Warning: local chef directory override file exists. Remember to delete ${lucidChefLocal}${noColor}"
+fi
+
+if [[ ${chefStatusCode} -eq 0 ]]; then
+  doExit 0 "lucid-chef completed successfully."
+  touch "/var/cache/chef/lastrun"
+else
+  doExit 1 "lucid-chef failed to run."
+fi
