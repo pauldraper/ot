@@ -8,7 +8,7 @@ class OperationSpec extends WordSpec {
 
   private[this] def document(values: String*) = Document(values.map(word))
 
-  "rebase" should {
+  "Operation.rebase" should {
 
     "merge insert and delete" in {
       val originalDocument = document("A", "B")
@@ -56,6 +56,28 @@ class OperationSpec extends WordSpec {
       val rebasedOperations = Operation.rebase(serverOperations, clientOperations)
       val finalDocument = Operation(rebasedOperations)(serverDocument)
       assert(finalDocument == document("B", "C"))
+    }
+
+  }
+
+  "Move.apply" should {
+
+    "move an word to the same spot" in {
+      val originalDocument = document("A", "B", "C")
+      val finalDocument = Move(1, 1)(originalDocument)
+      assert(finalDocument == document("A", "B", "C"))
+    }
+
+    "move an earlier word later" in {
+      val originalDocument = document("A", "B", "C")
+      val finalDocument = Move(0, 2)(originalDocument)
+      assert(finalDocument == document("B", "A", "C"))
+    }
+
+    "move a later word earlier" in {
+      val originalDocument = document("A", "B", "C")
+      val finalDocument = Move(2, 1)(originalDocument)
+      assert(finalDocument == document("A", "C", "B"))
     }
 
   }

@@ -1,3 +1,3 @@
 package ot.model
 
-case class OperationBatch(client: String, operations: Seq[Operation], baseVersion: Int)
+case class OperationBatch(client: String, color: Color, operations: Seq[Operation], baseVersion: Int)

@@ -24,6 +24,8 @@ class Server extends Controller {
     Ok[Html](DocumentHtml(playscalajs.html.scripts("client")))
   }
 
+  def version(version: Int): Action[RequestHeader] = ???
+
   private[this] val clients = mutable.Set[Concurrent.Channel[String]]()
 
   private[this] var state = Document(Nil)

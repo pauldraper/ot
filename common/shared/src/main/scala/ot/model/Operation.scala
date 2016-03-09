@@ -85,20 +85,22 @@ case class Insert(index: Int, word: Word) extends Operation with ShiftOperation 
 
 case class Move(from: Int, to: Int) extends Operation {
   def apply(document: Document) = {
-    if (from <= to) {
+    if (from < to) {
       document.copy(
         words = document.words.take(from)
           ++ document.words.slice(from + 1, to)
           ++ Seq(document.words(from))
           ++ document.words.drop(to)
       )
-    } else {
+    } else if (from > to) {
       document.copy(
         words = document.words.take(to)
           ++ Seq(document.words(from))
-          ++ document.words.slice(to + 1, from)
+          ++ document.words.slice(to, from)
           ++ document.words.drop(from + 1)
       )
+    } else {
+      document
     }
   }
 

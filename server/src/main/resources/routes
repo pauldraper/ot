@@ -1,4 +1,5 @@
 GET   /                  ot.server.Server.apply
 GET   /assets/*file      controllers.Assets.at(path="/public", file)
+GET   /version/:version  ot.server.Server.version(version: Int)
 
 GET   /echo              ot.server.Server.socket

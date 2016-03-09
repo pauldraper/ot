@@ -31,9 +31,9 @@ object Client extends JSApp {
   def main(): Unit = {
     color = colors(Random.nextInt(colors.size))
 
-    connect()
-
     window.onload = (_: Event) => {
+      connect()
+
       val colorElement = document.getElementById(DocumentHtml.colorId).asInstanceOf[HTMLElement]
       colorElement.style.background = color.hex
       colorElement.onclick = (_: Any) => selectionState.foreach { selection =>
@@ -66,14 +66,22 @@ object Client extends JSApp {
       render()
     }
     ws.onclose = (_: Any) => {
-      println("WebSocket closed!")
-      connect()
+      val button = document.getElementById(DocumentHtml.connectButtonId).asInstanceOf[HTMLElement]
+      button.textContent = "Connect"
+      button.onclick = (_: Any) => connect()
     }
-    ws.onopen = (_: Any) => ws.send(Pickle.intoString(savedBatches.size))
+    ws.onopen = {
+      val button = document.getElementById(DocumentHtml.connectButtonId).asInstanceOf[HTMLElement]
+      button.textContent = "Disconnect"
+      button.onclick = (_: Any) => disconnect()
+      (_: Any) => ws.send(Pickle.intoString(savedBatches.size))
+    }
   }
 
+  def disconnect() = ws.close()
+
   def save() = if (saveReady && localOperations.nonEmpty) {
-    ws.send(Pickle.intoString(OperationBatch(clientId, localOperations, savedBatches.size)))
+    ws.send(Pickle.intoString(OperationBatch(clientId, color, localOperations, savedBatches.size)))
     saveReady = false
   }
 
@@ -93,6 +101,16 @@ object Client extends JSApp {
     localState = Operation(localOperations)(savedState)
 
     savedBatches += batch
+
+    val log = document.getElementById(DocumentHtml.logId)
+    import scalatags.JsDom
+    import JsDom.all._
+    log.appendChild(
+      div(
+        JsDom.all.color := batch.color.hex,
+        s"Client ${batch.client} was working on version ${batch.baseVersion} and created version ${savedBatches.size}"
+      ).render
+    )
   }
 
   def localOperation(operation: Operation): Unit = {
@@ -153,7 +171,7 @@ object Client extends JSApp {
     }
     newWords.zipWithIndex.foreach { case (word, index) =>
       val element = textToNode(WordHtml(word)).asInstanceOf[raw.HTMLElement]
-      element.style.background = ""
+      element.style.background = "white"
       if (selectionState.contains(Right(index))) {
         element.style.color = "red"
       }

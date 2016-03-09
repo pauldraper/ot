@@ -6,7 +6,7 @@ lazy val common = crossProject
       "org.scalatest" %%% "scalatest" % "3.0.0-M10" % Test
     )
   )
-lazy val commonJS = common.js.enablePlugins(ScalaJSPlay)
+lazy val commonJS = common.js
 lazy val commonJVM = common.jvm
 
 lazy val client = project
