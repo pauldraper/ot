@@ -17,6 +17,8 @@ object Client extends JSApp {
   private[this] var ws: WebSocket = _
   private[this] var color: Color = _
 
+  private[this] var selectionState = Option.empty[Either[Int, Int]]
+
   private[this] val colors = Seq(
     Color(255, 10, 10),
     Color(10, 255, 10),
@@ -32,22 +34,14 @@ object Client extends JSApp {
     connect()
 
     window.onload = (_: Event) => {
-      for (i <- 1 to 4) {
-        val footer = document.getElementById(DocumentHtml.footerId)
-        def wordChoice(): Node = {
-          val word = Word(words(Random.nextInt(words.size)), color)
-          val node = textToNode(WordHtml(word))
-          node.asInstanceOf[raw.HTMLElement].style.background = ""
-          node.addEventListener("click", (_: Any) => {
-            node.parentNode.replaceChild(wordChoice(), node)
-            localOperation(Insert(localState.words.size, word))
-          })
-          node
+      val colorElement = document.getElementById(DocumentHtml.colorId).asInstanceOf[HTMLElement]
+      colorElement.style.background = color.hex
+      colorElement.onclick = (_: Any) => selectionState.foreach { selection =>
+        selection.left.foreach { i =>
+          selectionState = None
+          localOperation(Delete(i))
         }
-        footer.appendChild(wordChoice())
       }
-
-      document.getElementById(DocumentHtml.colorId).asInstanceOf[HTMLElement].style.background = color.hex
     }
   }
 
@@ -59,6 +53,8 @@ object Client extends JSApp {
 
   private[this] var saveReady = false
 
+  private[this] val newWords = ArrayBuffer[Word]()
+
   def connect(): Unit = {
     saveReady = false
     ws = new WebSocket("ws://localhost:9000/echo")
@@ -67,7 +63,7 @@ object Client extends JSApp {
       batches.foreach(remoteBatch)
       saveReady = true
       save()
-      refreshDocument()
+      render()
     }
     ws.onclose = (_: Any) => {
       println("WebSocket closed!")
@@ -99,21 +95,77 @@ object Client extends JSApp {
     savedBatches += batch
   }
 
-  def localOperation(operation: Operation) = {
+  def localOperation(operation: Operation): Unit = {
     localState = operation(localState)
     localOperations += operation
     save()
-    refreshDocument()
+    render()
   }
 
-  def refreshDocument() = {
+  def render(): Unit = {
     val content = document.getElementById(DocumentHtml.contentId)
     while (content.firstChild != null) {
       content.removeChild(content.firstChild)
     }
-    localState.words.foreach { word =>
-      content.appendChild(textToNode(WordHtml(word)))
+    def insert(index: Int) = selectionState.map { selection =>
+      import scalatags.JsDom.all._
+      val element = div(
+        background := "red",
+        display.`inline-block`,
+        height := 70.px,
+        marginLeft := (-7).px,
+        marginRight := (-7).px,
+        verticalAlign.middle,
+        width := 14.px
+      ).render
+      element.onclick = (_: Any) => {
+        selectionState = None
+        localOperation(selection.fold(Move(_, index), { i =>
+          val word = newWords(i)
+          newWords.remove(i)
+          Insert(index, word)
+        }))
+      }
+      element
     }
+    localState.words.zipWithIndex.foreach { case (word, index) =>
+      insert(index).foreach(content.appendChild)
+      content.appendChild {
+        val element = textToNode(WordHtml(word)).asInstanceOf[HTMLElement]
+        element.onclick = { _: Any =>
+          selectionState = Some(Left(index))
+          render()
+        }
+        if (selectionState.contains(Left(index))) {
+          element.style.color = "red"
+        }
+        element
+      }
+    }
+    insert(localState.words.size).foreach(content.appendChild)
+
+    while (newWords.size < 4) {
+      newWords += Word(words(Random.nextInt(words.size)), this.color)
+    }
+    val newWordsElement = document.getElementById(DocumentHtml.newWordsId)
+    while (newWordsElement.firstChild != null) {
+      newWordsElement.removeChild(newWordsElement.firstChild)
+    }
+    newWords.zipWithIndex.foreach { case (word, index) =>
+      val element = textToNode(WordHtml(word)).asInstanceOf[raw.HTMLElement]
+      element.style.background = ""
+      if (selectionState.contains(Right(index))) {
+        element.style.color = "red"
+      }
+      element.onclick = (_: Any) => {
+        selectionState = Some(Right(index))
+        render()
+      }
+      newWordsElement.appendChild(element)
+    }
+
+    val color = document.getElementById(DocumentHtml.colorId)
+    color.textContent = if (selectionState.exists(_.isLeft)) "X" else ""
   }
 
   def textToNode(text: scalatags.Text.TypedTag[String]) = {
