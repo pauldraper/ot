@@ -20,12 +20,13 @@ object Client extends JSApp {
   private[this] var selectionState = Option.empty[Either[Int, Int]]
 
   private[this] val colors = Seq(
-    Color(255, 10, 10),
-    Color(10, 255, 10),
-    Color(10, 10, 255),
-    Color(255, 255, 10),
-    Color(255, 10, 255),
-    Color(10, 255, 255)
+    Color(255, 182, 182),
+    Color(159, 121, 238),
+    Color(176, 196, 222),
+    Color(67, 205, 128),
+    Color(255, 169, 79),
+    Color(255, 99, 71),
+    Color(139, 137, 137)
   )
 
   def main(): Unit = {
@@ -193,10 +194,21 @@ object Client extends JSApp {
 
   private[this] val words = Seq(
     "a",
-    "bannana",
+    "apple",
     "the",
     ".",
-    "ate",
+    "Fluent",
+    "computer",
+    "small",
+    "chicken",
+    "?",
+    "hi",
+    "monkey",
+    "will",
+    "fun",
+    "have",
+    "Mr.",
+    "eat",
     "happy",
     "big",
     "to"

@@ -60,7 +60,7 @@ object DocumentHtml {
           ),
           div(
             id := logId,
-            background := "white",
+            background := "black",
             position.absolute,
             top := 80.px,
             bottom := 150.px,
